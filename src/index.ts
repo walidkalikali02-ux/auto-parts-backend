@@ -134,8 +134,10 @@ app.use("/api/reports",       reportsRoutes);
 app.use(notFound);
 app.use(errorHandler);
 
-app.listen(PORT, () => {
-  console.log(`
+// Only start HTTP server in local dev — Vercel handles this in production
+if (process.env.NODE_ENV !== "production" || process.env.FORCE_LISTEN === "true") {
+  app.listen(PORT, () => {
+    console.log(`
 ╔══════════════════════════════════════════════╗
 ║     AutoParts ERP — Node.js Backend          ║
 ║     نظام ERP لقطع غيار السيارات              ║
@@ -143,9 +145,9 @@ app.listen(PORT, () => {
 ║  🚀  http://localhost:${PORT}                    ║
 ║  📋  http://localhost:${PORT}/api                ║
 ║  🏥  http://localhost:${PORT}/health              ║
-║  🌍  ${process.env.NODE_ENV ?? "development"}                          ║
 ╚══════════════════════════════════════════════╝
-  `);
-});
+    `);
+  });
+}
 
 export default app;
