@@ -46,8 +46,18 @@ app.use("/api", rateLimit({
 }));
 
 // ============================================================
-// HEALTH CHECK
+// ROOT + HEALTH CHECK
 // ============================================================
+app.get("/", (_req, res) => {
+  res.json({
+    name:    "AutoParts ERP API",
+    version: "1.0.0",
+    status:  "ok",
+    docs:    "/api",
+    health:  "/health",
+  });
+});
+
 app.get("/health", (_req, res) => {
   res.json({
     status:  "ok",
