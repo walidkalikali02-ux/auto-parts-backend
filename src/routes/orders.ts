@@ -1,6 +1,7 @@
 import { Router, Response } from "express";
 import { supabaseAdmin } from "../lib/supabase.js";
 import { requireAuth, AuthRequest } from "../middleware/auth.js";
+import { sendEmail, orderConfirmedHtml, lowStockAlertHtml } from "../lib/email.js";
 
 const router = Router();
 const DEFAULT_TENANT    = "d0000000-0000-0000-0000-000000000001";
@@ -129,19 +130,62 @@ router.post("/sales", requireAuth, async (req: AuthRequest, res: Response) => {
   );
 
   // Deduct inventory
+  const lowStockItems: { name: string; part_number: string; qty: number; reorder_point: number }[] = [];
   if (status === "confirmed" || status === "delivered") {
     await Promise.all(items.map(async (i) => {
       const { data: inv } = await supabaseAdmin
-        .from("inventory").select("id,quantity").eq("part_id", i.part_id).eq("warehouse_id", DEFAULT_WAREHOUSE).single();
+        .from("inventory").select("id,quantity,reorder_point").eq("part_id", i.part_id).eq("warehouse_id", DEFAULT_WAREHOUSE).single();
       if (inv) {
-        await supabaseAdmin.from("inventory").update({ quantity: Math.max(0, inv.quantity - i.quantity) }).eq("id", inv.id);
+        const newQty = Math.max(0, inv.quantity - i.quantity);
+        await supabaseAdmin.from("inventory").update({ quantity: newQty }).eq("id", inv.id);
         await supabaseAdmin.from("inventory_movements").insert({
           tenant_id: DEFAULT_TENANT, part_id: i.part_id, warehouse_id: DEFAULT_WAREHOUSE,
           movement_type: "sale", quantity: -i.quantity, reference_type: "sales_order", reference_id: order.id,
           created_by: req.user!.id,
         });
+        // Track low stock after sale
+        if (newQty <= (inv.reorder_point ?? 5)) {
+          const { data: part } = await supabaseAdmin.from("parts").select("name_ar,part_number").eq("id", i.part_id).single();
+          if (part) lowStockItems.push({ name: part.name_ar, part_number: part.part_number, qty: newQty, reorder_point: inv.reorder_point ?? 5 });
+        }
       }
     }));
+  }
+
+  // Email: order confirmation to customer
+  if (status === "confirmed" && customer_id) {
+    const { data: cust } = await supabaseAdmin.from("customers").select("email,name_ar").eq("id", customer_id).single();
+    const { data: tenant } = await supabaseAdmin.from("tenants").select("name_ar,email").eq("id", DEFAULT_TENANT).single();
+    if (cust?.email) {
+      const itemsForEmail = await Promise.all(items.map(async (i) => {
+        const { data: p } = await supabaseAdmin.from("parts").select("name_ar").eq("id", i.part_id).single();
+        return { name: p?.name_ar ?? i.part_id, qty: i.quantity, price: i.unit_price };
+      }));
+      const sent = await sendEmail({
+        to: cust.email,
+        subject: `تأكيد الطلب #${order.order_number}`,
+        html: orderConfirmedHtml({
+          order_number: order.order_number, customer_name: cust.name_ar,
+          total: order.total, items: itemsForEmail, tenant_name: tenant?.name_ar ?? "AutoParts",
+        }),
+      });
+      if (sent) {
+        await supabaseAdmin.from("notification_log").insert({
+          tenant_id: DEFAULT_TENANT, type: "order_confirmed",
+          recipient: cust.email, subject: `تأكيد الطلب #${order.order_number}`,
+          payload: { order_id: order.id },
+        });
+      }
+    }
+
+    // Email: low stock alert to tenant admin
+    if (lowStockItems.length > 0 && tenant?.email) {
+      await sendEmail({
+        to: tenant.email,
+        subject: `تنبيه مخزون منخفض — ${lowStockItems.length} صنف`,
+        html: lowStockAlertHtml(lowStockItems, tenant.name_ar ?? "AutoParts"),
+      });
+    }
   }
 
   res.status(201).json({ ...order, items });

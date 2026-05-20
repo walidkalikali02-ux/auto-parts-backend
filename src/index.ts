@@ -15,6 +15,7 @@ import suppliersRoutes     from "./routes/suppliers.js";
 import compatibilityRoutes from "./routes/compatibility.js";
 import vinRoutes           from "./routes/vin.js";
 import reportsRoutes       from "./routes/reports.js";
+import settingsRoutes      from "./routes/settings.js";
 
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
 
@@ -137,6 +138,7 @@ app.use("/api/suppliers",     suppliersRoutes);
 app.use("/api/compatibility", compatibilityRoutes);
 app.use("/api/vin",           vinRoutes);
 app.use("/api/reports",       reportsRoutes);
+app.use("/api/settings",      settingsRoutes);
 
 // ============================================================
 // ERROR HANDLING
