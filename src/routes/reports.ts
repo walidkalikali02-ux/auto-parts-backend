@@ -90,25 +90,101 @@ router.get("/inventory", requireAuth, async (req: AuthRequest, res: Response) =>
   });
 });
 
-// GET /api/reports/dashboard — main KPIs
+// GET /api/reports/dashboard — main KPIs + analytics
 router.get("/dashboard", requireAuth, async (req: AuthRequest, res: Response) => {
-  const [partsRes, ordersRes, customersRes, inventoryRes] = await Promise.all([
+  const now = new Date();
+  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+
+  // Last 30 days window
+  const day30ago = new Date(now.getTime() - 30 * 86400000).toISOString().split("T")[0];
+  // Last 6 months
+  const month6ago = new Date(now.getFullYear(), now.getMonth() - 5, 1).toISOString().split("T")[0];
+
+  const [partsRes, ordersRes, customersRes, inventoryRes, trend30Res, topPartsRes, topCustomersRes, monthlySalesRes] = await Promise.all([
     supabaseAdmin.from("parts").select("id", { count: "exact", head: true }).eq("is_active", true),
     supabaseAdmin.from("sales_orders").select("total,status,created_at"),
     supabaseAdmin.from("customers").select("id", { count: "exact", head: true }).eq("is_active", true),
     supabaseAdmin.from("inventory").select("quantity").lt("quantity", 5),
+    // Revenue last 30 days (daily)
+    supabaseAdmin.from("sales_orders")
+      .select("total,status,created_at")
+      .gte("created_at", `${day30ago}T00:00:00Z`)
+      .neq("status", "cancelled")
+      .neq("status", "returned"),
+    // Top parts by units sold (via sales_order_items)
+    supabaseAdmin.from("sales_order_items")
+      .select("quantity,unit_price,parts(part_number,name_ar)")
+      .limit(200),
+    // Top customers by spend
+    supabaseAdmin.from("sales_orders")
+      .select("total,status,customers(name_ar)")
+      .neq("status", "cancelled")
+      .neq("status", "returned"),
+    // Monthly revenue last 6 months
+    supabaseAdmin.from("sales_orders")
+      .select("total,status,created_at")
+      .gte("created_at", `${month6ago}T00:00:00Z`)
+      .neq("status", "cancelled")
+      .neq("status", "returned"),
   ]);
 
   const allOrders = ordersRes.data ?? [];
   const activeOrders = allOrders.filter((o) => o.status !== "cancelled" && o.status !== "returned");
   const totalRevenue = activeOrders.reduce((s, o) => s + Number(o.total), 0);
-
-  // This month
-  const now = new Date();
-  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
   const monthRevenue = activeOrders
     .filter((o) => o.created_at >= monthStart)
     .reduce((s, o) => s + Number(o.total), 0);
+
+  // Revenue trend: last 30 days, one entry per day
+  const trendMap: Record<string, number> = {};
+  (trend30Res.data ?? []).forEach((o) => {
+    const d = o.created_at.slice(0, 10);
+    trendMap[d] = (trendMap[d] ?? 0) + Number(o.total);
+  });
+  const revenueTrend: { date: string; revenue: number }[] = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 86400000).toISOString().split("T")[0];
+    revenueTrend.push({ date: d, revenue: Math.round((trendMap[d] ?? 0) * 100) / 100 });
+  }
+
+  // Top parts by units sold
+  const partsMap: Record<string, { name: string; qty: number; revenue: number }> = {};
+  (topPartsRes.data ?? []).forEach((item: any) => {
+    const key = item.parts?.part_number ?? "unknown";
+    const name = item.parts?.name_ar ?? key;
+    if (!partsMap[key]) partsMap[key] = { name, qty: 0, revenue: 0 };
+    partsMap[key].qty += item.quantity;
+    partsMap[key].revenue += item.quantity * Number(item.unit_price ?? 0);
+  });
+  const topParts = Object.entries(partsMap)
+    .map(([part_number, v]) => ({ part_number, ...v }))
+    .sort((a, b) => b.qty - a.qty)
+    .slice(0, 7);
+
+  // Top customers by spend
+  const custMap: Record<string, number> = {};
+  (topCustomersRes.data ?? []).forEach((o: any) => {
+    const name = o.customers?.name_ar ?? "نقدي";
+    custMap[name] = (custMap[name] ?? 0) + Number(o.total);
+  });
+  const topCustomers = Object.entries(custMap)
+    .map(([name, revenue]) => ({ name, revenue: Math.round(revenue * 100) / 100 }))
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 5);
+
+  // Monthly revenue (last 6 months)
+  const monthlyMap: Record<string, number> = {};
+  (monthlySalesRes.data ?? []).forEach((o) => {
+    const m = o.created_at.slice(0, 7); // "YYYY-MM"
+    monthlyMap[m] = (monthlyMap[m] ?? 0) + Number(o.total);
+  });
+  const monthlyRevenue: { month: string; revenue: number }[] = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const label = d.toLocaleDateString("ar-SA", { month: "short", year: "numeric" });
+    monthlyRevenue.push({ month: label, revenue: Math.round((monthlyMap[key] ?? 0) * 100) / 100 });
+  }
 
   res.json({
     total_parts:     partsRes.count ?? 0,
@@ -117,6 +193,10 @@ router.get("/dashboard", requireAuth, async (req: AuthRequest, res: Response) =>
     total_revenue:   totalRevenue,
     month_revenue:   monthRevenue,
     low_stock_count: (inventoryRes.data ?? []).length,
+    revenue_trend:   revenueTrend,
+    top_parts:       topParts,
+    top_customers:   topCustomers,
+    monthly_revenue: monthlyRevenue,
   });
 });
 
