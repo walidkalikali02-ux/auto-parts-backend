@@ -16,6 +16,8 @@ import compatibilityRoutes from "./routes/compatibility.js";
 import vinRoutes           from "./routes/vin.js";
 import reportsRoutes       from "./routes/reports.js";
 import settingsRoutes      from "./routes/settings.js";
+import paymentsRoutes      from "./routes/payments.js";
+import notificationsRoutes from "./routes/notifications.js";
 
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
 
@@ -138,7 +140,9 @@ app.use("/api/suppliers",     suppliersRoutes);
 app.use("/api/compatibility", compatibilityRoutes);
 app.use("/api/vin",           vinRoutes);
 app.use("/api/reports",       reportsRoutes);
-app.use("/api/settings",      settingsRoutes);
+app.use("/api/settings",       settingsRoutes);
+app.use("/api/payments",       paymentsRoutes);
+app.use("/api/notifications",  notificationsRoutes);
 
 // ============================================================
 // ERROR HANDLING

@@ -200,4 +200,71 @@ router.get("/dashboard", requireAuth, async (req: AuthRequest, res: Response) =>
   });
 });
 
+// GET /api/reports/vat?from=YYYY-MM-DD&to=YYYY-MM-DD
+router.get("/vat", requireAuth, async (req: AuthRequest, res: Response) => {
+  const now = new Date();
+  const defaultFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+  const from = (req.query.from as string) || defaultFrom;
+  const to   = (req.query.to   as string) || now.toISOString().split("T")[0];
+
+  const [salesRes, purchasesRes] = await Promise.all([
+    supabaseAdmin
+      .from("sales_orders")
+      .select("total, subtotal, tax_amount, status, created_at")
+      .gte("created_at", `${from}T00:00:00Z`)
+      .lte("created_at", `${to}T23:59:59Z`)
+      .neq("status", "cancelled"),
+    supabaseAdmin
+      .from("purchase_orders")
+      .select("total, subtotal, tax_amount, status, created_at")
+      .gte("created_at", `${from}T00:00:00Z`)
+      .lte("created_at", `${to}T23:59:59Z`)
+      .neq("status", "cancelled"),
+  ]);
+
+  const sales     = salesRes.data ?? [];
+  const purchases = purchasesRes.data ?? [];
+
+  const taxableSales    = sales.reduce((s, o) => s + Number(o.subtotal ?? 0), 0);
+  const vatCollected    = sales.reduce((s, o) => s + Number(o.tax_amount ?? 0), 0);
+  const totalSales      = sales.reduce((s, o) => s + Number(o.total ?? 0), 0);
+
+  const taxablePurchases = purchases.reduce((s, o) => s + Number(o.subtotal ?? 0), 0);
+  const vatPaid          = purchases.reduce((s, o) => s + Number(o.tax_amount ?? 0), 0);
+  const totalPurchases   = purchases.reduce((s, o) => s + Number(o.total ?? 0), 0);
+
+  const netVat = vatCollected - vatPaid;
+
+  // Monthly breakdown
+  const byMonth: Record<string, { sales: number; vat_collected: number; purchases: number; vat_paid: number }> = {};
+  sales.forEach((o) => {
+    const m = o.created_at.slice(0, 7);
+    if (!byMonth[m]) byMonth[m] = { sales: 0, vat_collected: 0, purchases: 0, vat_paid: 0 };
+    byMonth[m].sales         += Number(o.subtotal ?? 0);
+    byMonth[m].vat_collected += Number(o.tax_amount ?? 0);
+  });
+  purchases.forEach((o) => {
+    const m = o.created_at.slice(0, 7);
+    if (!byMonth[m]) byMonth[m] = { sales: 0, vat_collected: 0, purchases: 0, vat_paid: 0 };
+    byMonth[m].purchases += Number(o.subtotal ?? 0);
+    byMonth[m].vat_paid  += Number(o.tax_amount ?? 0);
+  });
+
+  res.json({
+    period: { from, to },
+    summary: {
+      taxable_sales:     Math.round(taxableSales     * 100) / 100,
+      vat_collected:     Math.round(vatCollected     * 100) / 100,
+      total_sales:       Math.round(totalSales       * 100) / 100,
+      taxable_purchases: Math.round(taxablePurchases * 100) / 100,
+      vat_paid:          Math.round(vatPaid          * 100) / 100,
+      total_purchases:   Math.round(totalPurchases   * 100) / 100,
+      net_vat:           Math.round(netVat           * 100) / 100,
+      orders_count:      sales.length,
+      purchases_count:   purchases.length,
+    },
+    by_month: byMonth,
+  });
+});
+
 export default router;
