@@ -18,6 +18,8 @@ import reportsRoutes       from "./routes/reports.js";
 import settingsRoutes      from "./routes/settings.js";
 import paymentsRoutes      from "./routes/payments.js";
 import notificationsRoutes from "./routes/notifications.js";
+import transfersRoutes     from "./routes/transfers.js";
+import stocktakeRoutes     from "./routes/stocktake.js";
 
 import { errorHandler, notFound } from "./middleware/errorHandler.js";
 
@@ -143,6 +145,8 @@ app.use("/api/reports",       reportsRoutes);
 app.use("/api/settings",       settingsRoutes);
 app.use("/api/payments",       paymentsRoutes);
 app.use("/api/notifications",  notificationsRoutes);
+app.use("/api/transfers",      transfersRoutes);
+app.use("/api/stocktake",      stocktakeRoutes);
 
 // ============================================================
 // ERROR HANDLING
