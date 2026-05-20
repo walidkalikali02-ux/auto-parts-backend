@@ -267,4 +267,212 @@ router.get("/vat", requireAuth, async (req: AuthRequest, res: Response) => {
   });
 });
 
+// GET /api/reports/sales?from=&to=&group_by=day|week|month
+router.get("/sales", requireAuth, async (req: AuthRequest, res: Response) => {
+  const now = new Date();
+  const from = (req.query.from as string) || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+  const to   = (req.query.to   as string) || now.toISOString().split("T")[0];
+
+  const [ordersRes, itemsRes] = await Promise.all([
+    supabaseAdmin
+      .from("sales_orders")
+      .select("id,order_number,total,subtotal,tax_amount,status,payment_method,payment_status,created_at,customers(id,name_ar)")
+      .gte("created_at", `${from}T00:00:00Z`)
+      .lte("created_at", `${to}T23:59:59Z`)
+      .neq("status", "cancelled")
+      .order("created_at", { ascending: false }),
+    supabaseAdmin
+      .from("sales_order_items")
+      .select("quantity,unit_price,discount_pct,parts(part_number,name_ar,part_categories(name_ar))")
+      .gte("created_at", `${from}T00:00:00Z`)
+      .lte("created_at", `${to}T23:59:59Z`)
+      .limit(2000),
+  ]);
+
+  const orders = ordersRes.data ?? [];
+  const items  = itemsRes.data ?? [];
+
+  const active   = orders.filter((o) => o.status !== "returned");
+  const returned = orders.filter((o) => o.status === "returned");
+
+  const totalRevenue  = active.reduce((s, o) => s + Number(o.total), 0);
+  const totalVAT      = active.reduce((s, o) => s + Number(o.tax_amount), 0);
+  const totalReturns  = returned.reduce((s, o) => s + Math.abs(Number(o.total)), 0);
+  const netRevenue    = totalRevenue - totalReturns;
+
+  // By payment method
+  const byMethod: Record<string, { count: number; amount: number }> = {};
+  active.forEach((o) => {
+    const m = o.payment_method ?? "cash";
+    if (!byMethod[m]) byMethod[m] = { count: 0, amount: 0 };
+    byMethod[m].count++;
+    byMethod[m].amount += Number(o.total);
+  });
+
+  // By status
+  const byStatus: Record<string, number> = {};
+  orders.forEach((o) => { byStatus[o.status] = (byStatus[o.status] ?? 0) + 1; });
+
+  // Daily trend
+  const dailyMap: Record<string, { revenue: number; count: number }> = {};
+  active.forEach((o) => {
+    const d = o.created_at.slice(0, 10);
+    if (!dailyMap[d]) dailyMap[d] = { revenue: 0, count: 0 };
+    dailyMap[d].revenue += Number(o.total);
+    dailyMap[d].count++;
+  });
+
+  // By category
+  const catMap: Record<string, { revenue: number; qty: number }> = {};
+  items.forEach((i: any) => {
+    const cat = i.parts?.part_categories?.name_ar ?? "أخرى";
+    if (!catMap[cat]) catMap[cat] = { revenue: 0, qty: 0 };
+    catMap[cat].revenue += i.quantity * Number(i.unit_price) * (1 - (i.discount_pct ?? 0) / 100);
+    catMap[cat].qty     += i.quantity;
+  });
+
+  // Top customers
+  const custMap: Record<string, { name: string; revenue: number; count: number }> = {};
+  active.forEach((o: any) => {
+    const key = o.customers?.id ?? "cash";
+    const name = o.customers?.name_ar ?? "نقدي";
+    if (!custMap[key]) custMap[key] = { name, revenue: 0, count: 0 };
+    custMap[key].revenue += Number(o.total);
+    custMap[key].count++;
+  });
+
+  res.json({
+    period: { from, to },
+    summary: {
+      total_orders:   active.length,
+      total_revenue:  Math.round(totalRevenue * 100) / 100,
+      total_vat:      Math.round(totalVAT * 100) / 100,
+      total_returns:  Math.round(totalReturns * 100) / 100,
+      net_revenue:    Math.round(netRevenue * 100) / 100,
+      avg_order:      active.length > 0 ? Math.round((totalRevenue / active.length) * 100) / 100 : 0,
+    },
+    by_method: byMethod,
+    by_status: byStatus,
+    by_category: Object.entries(catMap).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.revenue - a.revenue),
+    top_customers: Object.values(custMap).sort((a, b) => b.revenue - a.revenue).slice(0, 10),
+    daily_trend: Object.entries(dailyMap).map(([date, v]) => ({ date, ...v })).sort((a, b) => a.date.localeCompare(b.date)),
+    orders: orders.slice(0, 100),
+  });
+});
+
+// GET /api/reports/profit?from=&to=
+router.get("/profit", requireAuth, async (req: AuthRequest, res: Response) => {
+  const now  = new Date();
+  const from = (req.query.from as string) || `${now.getFullYear()}-01-01`;
+  const to   = (req.query.to   as string) || now.toISOString().split("T")[0];
+
+  const [salesItemsRes, purchasesRes] = await Promise.all([
+    supabaseAdmin
+      .from("sales_order_items")
+      .select("quantity,unit_price,discount_pct,parts(price_cost,part_categories(name_ar)),sales_orders!inner(status,created_at,tax_amount,subtotal,total)")
+      .gte("sales_orders.created_at", `${from}T00:00:00Z`)
+      .lte("sales_orders.created_at", `${to}T23:59:59Z`)
+      .neq("sales_orders.status", "cancelled")
+      .neq("sales_orders.status", "returned")
+      .limit(5000),
+    supabaseAdmin
+      .from("purchase_order_items")
+      .select("quantity,unit_cost,purchase_orders!inner(status,created_at)")
+      .gte("purchase_orders.created_at", `${from}T00:00:00Z`)
+      .lte("purchase_orders.created_at", `${to}T23:59:59Z`)
+      .neq("purchase_orders.status", "cancelled")
+      .limit(5000),
+  ]);
+
+  const salesItems  = salesItemsRes.data ?? [];
+  const purchItems  = purchasesRes.data ?? [];
+
+  let totalRevenue = 0, totalCOGS = 0;
+  const catProfit: Record<string, { revenue: number; cogs: number }> = {};
+
+  salesItems.forEach((i: any) => {
+    const revenue = i.quantity * Number(i.unit_price) * (1 - (i.discount_pct ?? 0) / 100);
+    const cogs    = i.quantity * Number(i.parts?.price_cost ?? 0);
+    const cat     = i.parts?.part_categories?.name_ar ?? "أخرى";
+    totalRevenue += revenue;
+    totalCOGS    += cogs;
+    if (!catProfit[cat]) catProfit[cat] = { revenue: 0, cogs: 0 };
+    catProfit[cat].revenue += revenue;
+    catProfit[cat].cogs    += cogs;
+  });
+
+  const totalPurchaseCost = purchItems.reduce((s, i: any) => s + i.quantity * Number(i.unit_cost), 0);
+  const grossProfit  = totalRevenue - totalCOGS;
+  const grossMargin  = totalRevenue > 0 ? (grossProfit / totalRevenue) * 100 : 0;
+
+  // Monthly P&L
+  const monthMap: Record<string, { revenue: number; cogs: number }> = {};
+  salesItems.forEach((i: any) => {
+    const m       = (i.sales_orders?.created_at ?? "").slice(0, 7);
+    const revenue = i.quantity * Number(i.unit_price) * (1 - (i.discount_pct ?? 0) / 100);
+    const cogs    = i.quantity * Number(i.parts?.price_cost ?? 0);
+    if (!monthMap[m]) monthMap[m] = { revenue: 0, cogs: 0 };
+    monthMap[m].revenue += revenue;
+    monthMap[m].cogs    += cogs;
+  });
+
+  res.json({
+    period: { from, to },
+    summary: {
+      total_revenue:      Math.round(totalRevenue * 100) / 100,
+      total_cogs:         Math.round(totalCOGS * 100) / 100,
+      gross_profit:       Math.round(grossProfit * 100) / 100,
+      gross_margin_pct:   Math.round(grossMargin * 10) / 10,
+      total_purchases:    Math.round(totalPurchaseCost * 100) / 100,
+    },
+    by_category: Object.entries(catProfit).map(([name, v]) => ({
+      name,
+      revenue:      Math.round(v.revenue * 100) / 100,
+      cogs:         Math.round(v.cogs * 100) / 100,
+      gross_profit: Math.round((v.revenue - v.cogs) * 100) / 100,
+      margin_pct:   v.revenue > 0 ? Math.round(((v.revenue - v.cogs) / v.revenue) * 1000) / 10 : 0,
+    })).sort((a, b) => b.gross_profit - a.gross_profit),
+    monthly: Object.entries(monthMap).map(([month, v]) => ({
+      month,
+      revenue:      Math.round(v.revenue * 100) / 100,
+      cogs:         Math.round(v.cogs * 100) / 100,
+      gross_profit: Math.round((v.revenue - v.cogs) * 100) / 100,
+    })).sort((a, b) => a.month.localeCompare(b.month)),
+  });
+});
+
+// GET /api/reports/movements?from=&to=&part_id=&type=
+router.get("/movements", requireAuth, async (req: AuthRequest, res: Response) => {
+  const { from, to, part_id, type } = req.query as Record<string, string>;
+  const now = new Date();
+  const fromDate = from || new Date(now.getTime() - 30 * 86400000).toISOString().split("T")[0];
+  const toDate   = to   || now.toISOString().split("T")[0];
+
+  let q = supabaseAdmin
+    .from("inventory_movements")
+    .select("*, parts(part_number,name_ar), warehouses(name_ar)")
+    .gte("created_at", `${fromDate}T00:00:00Z`)
+    .lte("created_at", `${toDate}T23:59:59Z`)
+    .order("created_at", { ascending: false })
+    .limit(300);
+
+  if (part_id) q = q.eq("part_id", part_id);
+  if (type)    q = q.eq("movement_type", type);
+
+  const { data, error } = await q;
+  if (error) return res.status(400).json({ error: error.message });
+
+  // Summarize by type
+  const byType: Record<string, { count: number; qty_in: number; qty_out: number }> = {};
+  (data ?? []).forEach((m) => {
+    const t = m.movement_type ?? "other";
+    if (!byType[t]) byType[t] = { count: 0, qty_in: 0, qty_out: 0 };
+    byType[t].count++;
+    if (m.quantity > 0) byType[t].qty_in  += m.quantity;
+    else                byType[t].qty_out += Math.abs(m.quantity);
+  });
+
+  res.json({ movements: data ?? [], by_type: byType, period: { from: fromDate, to: toDate } });
+});
+
 export default router;
